@@ -1,19 +1,22 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <BaseOutputPath>$(SolutionDir)bin/$(MSBuildProjectName)</BaseOutputPath>
+    <BaseOutputPath>..\..\bin\$(MSBuildProjectName)</BaseOutputPath>
+    <CETCompat>false</CETCompat>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
     <LangVersion>Latest</LangVersion>
+    <NoWarn>IL2026;IL2104;IL3053</NoWarn>
     <Nullable>enable</Nullable>
     <OutputType>Exe</OutputType>
     <PublishAot>true</PublishAot>
-    <RuntimeIdentifiers>win-x64;linux-x64</RuntimeIdentifiers>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="$(SolutionDir)src\LibProtodec\LibProtodec.csproj" />
-    <PackageReference Include="ConsoleAppFramework" Version="5.2.2" PrivateAssets="All" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.0-preview.6.24327.7" />
+    <ProjectReference Include="..\LibProtodec\LibProtodec.csproj" />
+    <PackageReference Include="ConsoleAppFramework" Version="5.7.13" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
   </ItemGroup>
 
 </Project>

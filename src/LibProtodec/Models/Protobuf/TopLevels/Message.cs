@@ -14,9 +14,10 @@ namespace LibProtodec.Models.Protobuf.TopLevels;
 
 public sealed class Message : TopLevel, INestableType
 {
-    public readonly Dictionary<string, List<int>>     OneOfs = [];
-    public readonly Dictionary<int, MessageField>     Fields = [];
-    public readonly Dictionary<string, INestableType> Nested = [];
+    public readonly Dictionary<string, List<int>>     OneOfs    = [];
+    public readonly Dictionary<int, MessageField>     Fields    = [];
+    public readonly Dictionary<string, INestableType> Nested    = [];
+    public readonly List<MessageField>                UnkFields = [];
 
     public override void WriteTo(IndentedTextWriter writer)
     {
@@ -32,9 +33,9 @@ public sealed class Message : TopLevel, INestableType
 
         int[] oneOfs = OneOfs.SelectMany(static oneOf => oneOf.Value).ToArray();
 
-        foreach (MessageField field in Fields.Values)
+        foreach ((int id, MessageField field) in Fields)
         {
-            if (oneOfs.Contains(field.Id))
+            if (oneOfs.Contains(id))
                 continue;
 
             field.WriteTo(writer, isOneOf: false);
@@ -50,11 +51,19 @@ public sealed class Message : TopLevel, INestableType
 
             foreach (int fieldId in fieldIds)
             {
-                Fields[fieldId].WriteTo(writer, isOneOf: true);
+                if (Fields.TryGetValue(fieldId, out MessageField? field))
+                    field.WriteTo(writer, isOneOf: true);
+                else
+                    writer.WriteLine($"// unknown field = {fieldId};");
             }
 
             writer.Indent--;
             writer.WriteLine('}');
+        }
+
+        foreach (MessageField field in UnkFields)
+        {
+            field.WriteTo(writer, isOneOf: false);
         }
 
         foreach (INestableType nested in Nested.Values)

@@ -6,6 +6,7 @@
 
 using System.CodeDom.Compiler;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using LibProtodec.Models.Protobuf.TopLevels;
@@ -14,7 +15,7 @@ namespace LibProtodec.Models.Protobuf;
 
 public sealed class Protobuf
 {
-    private string? _fileName;
+    private HashSet<string>? _wktImports;
     private HashSet<string>? _imports;
 
     public readonly List<TopLevel> TopLevels = [];
@@ -23,8 +24,12 @@ public sealed class Protobuf
     public string? AssemblyName { get; init; }
     public string? Namespace    { get; init; }
 
+    [field: MaybeNull]
     public string FileName =>
-        _fileName ??= $"{string.Join('_', TopLevels.Select(static topLevel => topLevel.Name))}.proto";
+        field ??= $"{string.Join('_', TopLevels.Select(static topLevel => topLevel.Name))}.proto";
+
+    public HashSet<string> WellKnownImports =>
+        _wktImports ??= [];
 
     public HashSet<string> Imports =>
         _imports ??= [];
@@ -45,16 +50,17 @@ public sealed class Protobuf
                 ? """syntax = "proto3";"""
                 : $"""edition = "{Edition}";""");
 
-        if (_imports is not null)
+        if (_wktImports is not null || _imports is not null)
         {
             writer.WriteLine();
-            
-            foreach (string import in _imports)
-            {
-                writer.Write("import \"");
-                writer.Write(import);
-                writer.WriteLine("\";");
-            }
+
+            if (_wktImports is not null)
+                foreach (string import in _wktImports)
+                    WriteImportTo(writer, import);
+
+            if (_imports is not null)
+                foreach (string import in _imports)
+                    WriteImportTo(writer, import);
         }
 
         if (Namespace is not null)
@@ -89,5 +95,12 @@ public sealed class Protobuf
         }
 
         writer.WriteLine(';');
+    }
+
+    public static void WriteImportTo(TextWriter writer, string import)
+    {
+        writer.Write("import \"");
+        writer.Write(import);
+        writer.WriteLine("\";");
     }
 }

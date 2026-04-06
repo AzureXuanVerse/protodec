@@ -1,4 +1,4 @@
-﻿// Copyright © 2023-2024 Xpl0itR
+﻿// Copyright © 2023-2026 Xpl0itR
 // 
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -10,18 +10,20 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
-using SystemEx;
+using System.Runtime.CompilerServices;
 using CommunityToolkit.Diagnostics;
-using LibProtodec.Models.Cil;
+using LibProtodec.Deobfuscation;
 using LibProtodec.Models.Protobuf;
 using LibProtodec.Models.Protobuf.Fields;
 using LibProtodec.Models.Protobuf.TopLevels;
 using LibProtodec.Models.Protobuf.Types;
+using LibProtodec.Reflection;
+using LibProtodec.Reflection.Il2Cpp;
 using Microsoft.Extensions.Logging;
+using SystemEx;
+using ZLinq;
 
 namespace LibProtodec;
-
-public delegate bool NameLookupFunc(string name, [MaybeNullWhen(false)] out string translatedName);
 
 // ReSharper disable ClassWithVirtualMembersNeverInherited.Global, MemberCanBePrivate.Global, MemberCanBeProtected.Global, PropertyCanBeMadeInitOnly.Global
 public class ProtodecContext
@@ -30,9 +32,9 @@ public class ProtodecContext
 
     public readonly List<Protobuf> Protobufs = [];
 
-    public ILogger<ProtodecContext>? Logger { get; set; }
+    public ILogger? Logger { get; set; }
 
-    public NameLookupFunc? NameLookup { get; set; }
+    public INameTranslator? NameTranslator { get; set; }
 
     public void WriteAllTo(IndentedTextWriter writer)
     {
@@ -41,7 +43,17 @@ public class ProtodecContext
         writer.WriteLine("""syntax = "proto3";""");
         writer.WriteLine();
 
-        foreach (TopLevel topLevel in Protobufs.SelectMany(static proto => proto.TopLevels))
+        HashSet<string> wellKnownImports = Protobufs.SelectMany(static proto => proto.WellKnownImports).ToHashSet();
+        if (wellKnownImports.Count > 0)
+        {
+            foreach (string import in wellKnownImports)
+                Protobuf.WriteImportTo(writer, import);
+
+            writer.WriteLine();
+        }
+
+        foreach (TopLevel topLevel in Protobufs.SelectMany(static proto => proto.TopLevels)
+                                               .OrderBy(static topLevel => topLevel.Name))
         {
             topLevel.WriteTo(writer);
             writer.WriteLine();
@@ -49,7 +61,7 @@ public class ProtodecContext
         }
     }
 
-    public virtual Message ParseMessage(ICilType messageClass, ParserOptions options = ParserOptions.None)
+    public virtual Message ParseMessage(ICilType messageClass, CilParserOptions options = CilParserOptions.None)
     {
         Guard.IsTrue(messageClass is { IsClass: true, IsSealed: true });
         using IDisposable? _ = Logger?.BeginScopeParsingMessage(messageClass.FullName);
@@ -60,20 +72,23 @@ public class ProtodecContext
             return (Message)parsedMessage;
         }
 
+        ICilTypeNameProvider messageTypeName = TranslateTypeName(messageClass);
         Message message = new()
         {
-            Name       = TranslateTypeName(messageClass),
+            Name       = messageTypeName.Name,
             IsObsolete = HasObsoleteAttribute(messageClass.CustomAttributes)
         };
         _parsed.Add(messageClass.FullName, message);
 
-        Protobuf protobuf = GetProtobuf(messageClass, message, options);
+        Protobuf protobuf = GetProtobuf(messageClass, message, messageTypeName.Namespace, options);
 
         List<ICilField> idFields = messageClass.GetFields()
+                                               .AsValueEnumerable()
                                                .Where(static field => field is { IsPublic: true, IsStatic: true, IsLiteral: true })
                                                .ToList();
 
         List<ICilProperty> properties = messageClass.GetProperties()
+                                                    .AsValueEnumerable()
                                                     .Where(static property => property is { IsInherited: false, CanRead: true, Getter: { IsPublic: true, IsStatic: false, IsVirtual: false } })
                                                     .ToList();
 
@@ -84,7 +99,13 @@ public class ProtodecContext
 
             using IDisposable? __ = Logger?.BeginScopeParsingProperty(property.Name, propertyType.FullName);
 
-            if (((options & ParserOptions.IncludePropertiesWithoutNonUserCodeAttribute) == 0 && !HasNonUserCodeAttribute(property.CustomAttributes)))
+            if (IsEnabled(options, CilParserOptions.RequireGeneratedCodeAttributeForProperties) && !HasGeneratedCodeAttribute(property.CustomAttributes, "protoc"))
+            {
+                Logger?.LogSkippingPropertyWithoutGeneratedCodeAttribute();
+                continue;
+            }
+
+            if (!IsEnabled(options, CilParserOptions.IncludePropertiesWithoutNonUserCodeAttribute) && !HasNonUserCodeAttribute(property.CustomAttributes))
             {
                 Logger?.LogSkippingPropertyWithoutNonUserCodeAttribute();
                 continue;
@@ -97,6 +118,7 @@ public class ProtodecContext
                 Logger?.LogParsedOneOfField(oneOfName);
 
                 List<int> oneOfProtoFieldIds = propertyType.GetFields()
+                                                           .AsValueEnumerable()
                                                            .Where(static field => field.IsLiteral)
                                                            .Select(static field => (int)field.ConstantValue!)
                                                            .Where(static id => id > 0)
@@ -113,23 +135,26 @@ public class ProtodecContext
                 pi++;
             }
 
-            if (idFields.Count <= fi)
-            {
-                Logger?.LogFailedToLocateIdField();
-                continue;
-            }
-
             MessageField field = new(message)
             {
                 Type       = ParseFieldType(propertyType, options, protobuf),
                 Name       = TranslateMessageFieldName(property.Name),
-                Id         = (int)idFields[fi].ConstantValue!,
                 IsObsolete = HasObsoleteAttribute(property.CustomAttributes),
                 HasHasProp = msgFieldHasHasProp
             };
 
+            if (idFields.Count <= fi)
+            {
+                Logger?.LogFailedToLocateIdField();
+                message.UnkFields.Add(field);
+            }
+            else
+            {
+                field.Id = (int)idFields[fi].ConstantValue!;
+                message.Fields.Add(field.Id.Value, field);
+            }
+
             Logger?.LogParsedField(field.Name, field.Id, field.Type.Name);
-            message.Fields.Add(field.Id, field);
             fi++;
         }
 
@@ -137,7 +162,7 @@ public class ProtodecContext
         return message;
     }
 
-    public virtual Enum ParseEnum(ICilType enumEnum, ParserOptions options = ParserOptions.None)
+    public virtual Enum ParseEnum(ICilType enumEnum, CilParserOptions options = CilParserOptions.None)
     {
         Guard.IsTrue(enumEnum.IsEnum);
         using IDisposable? _ = Logger?.BeginScopeParsingEnum(enumEnum.FullName);
@@ -148,16 +173,17 @@ public class ProtodecContext
             return (Enum)parsedEnum;
         }
 
+        ICilTypeNameProvider enumTypeName = TranslateTypeName(enumEnum);
         Enum @enum = new()
         {
-            Name         = TranslateTypeName(enumEnum),
-            IsObsolete   = HasObsoleteAttribute(enumEnum.CustomAttributes)
+            Name       = enumTypeName.Name,
+            IsObsolete = HasObsoleteAttribute(enumEnum.CustomAttributes)
         };
         _parsed.Add(enumEnum.FullName, @enum);
 
-        Protobuf protobuf = GetProtobuf(enumEnum, @enum, options);
+        Protobuf protobuf = GetProtobuf(enumEnum, @enum, enumTypeName.Namespace, options);
 
-        foreach (ICilField enumField in enumEnum.GetFields().Where(static field => field.IsLiteral))
+        foreach (ICilField enumField in enumEnum.GetFields().AsValueEnumerable().Where(static field => field.IsLiteral))
         {
             using IDisposable? __ = Logger?.BeginScopeParsingField(enumField.Name);
 
@@ -172,7 +198,7 @@ public class ProtodecContext
             @enum.Fields.Add(field);
         }
 
-        if (@enum.Fields.All(static field => field.Id != 0))
+        if (@enum.Fields.AsValueEnumerable().All(static field => field.Id != 0))
         {
             protobuf.Edition = "2023";
             @enum.IsClosed   = true;
@@ -182,7 +208,7 @@ public class ProtodecContext
         return @enum;
     }
 
-    public virtual Service ParseService(ICilType serviceClass, ParserOptions options = ParserOptions.None)
+    public virtual Service ParseService(ICilType serviceClass, CilParserOptions options = CilParserOptions.None)
     {
         Guard.IsTrue(serviceClass.IsClass);
 
@@ -192,8 +218,8 @@ public class ProtodecContext
             if (serviceClass is { IsSealed: true, IsNested: false })
             {
                 List<ICilType> nested = serviceClass.GetNestedTypes().ToList();
-                serviceClass = nested.SingleOrDefault(static nested => nested is { IsAbstract: true, IsSealed: false }) 
-                            ?? nested.Single(static nested => nested is { IsClass: true, IsAbstract: false });
+                serviceClass = nested.AsValueEnumerable().SingleOrDefault(static nested => nested is { IsAbstract: true, IsSealed  : false }) 
+                            ?? nested.AsValueEnumerable().Single(static nested => nested is { IsClass            : true, IsAbstract: false });
             }
             
             if (serviceClass is { IsNested: true, IsAbstract: true, IsSealed: false })
@@ -216,20 +242,21 @@ public class ProtodecContext
             return (Service)parsedService;
         }
 
+        ICilTypeNameProvider serviceTypeName = TranslateTypeName(serviceClass.DeclaringType);
         Service service = new()
         {
-            Name         = TranslateTypeName(serviceClass.DeclaringType),
-            IsObsolete   = HasObsoleteAttribute(serviceClass.CustomAttributes)
+            Name       = serviceTypeName.Name,
+            IsObsolete = HasObsoleteAttribute(serviceClass.CustomAttributes)
         };
         _parsed.Add(serviceClass.DeclaringType!.FullName, service);
 
-        Protobuf protobuf = NewProtobuf(serviceClass, service);
+        Protobuf protobuf = NewProtobuf(service, serviceClass.DeclaringAssemblyName, serviceTypeName.Namespace);
 
-        foreach (ICilMethod cilMethod in serviceClass.GetMethods().Where(static method => method is { IsInherited: false, IsPublic: true, IsStatic: false, IsConstructor: false }))
+        foreach (ICilMethod cilMethod in serviceClass.GetMethods().AsValueEnumerable().Where(static method => method is { IsInherited: false, IsPublic: true, IsStatic: false, IsConstructor: false }))
         {
             using IDisposable? __ = Logger?.BeginScopeParsingMethod(cilMethod.Name);
 
-            if ((options & ParserOptions.IncludeServiceMethodsWithoutGeneratedCodeAttribute) == 0
+            if (!IsEnabled(options, CilParserOptions.IncludeServiceMethodsWithoutGeneratedCodeAttribute)
              && !HasGeneratedCodeAttribute(cilMethod.CustomAttributes, "grpc_csharp_plugin"))
             {
                 Logger?.LogSkippingMethodWithoutGeneratedCodeAttribute();
@@ -241,8 +268,8 @@ public class ProtodecContext
 
             if (isClientClass.Value)
             {
-                string returnTypeName = TranslateTypeName(returnType);
-                if (returnTypeName == "AsyncUnaryCall`1")
+                ICilTypeNameProvider returnTypeName = TranslateTypeName(returnType);
+                if (returnTypeName.Name == "AsyncUnaryCall`1")
                 {
                     Logger?.LogSkippingDuplicateMethod();
                     continue;
@@ -261,7 +288,7 @@ public class ProtodecContext
                         requestType  = returnType.GenericTypeArguments[0];
                         responseType = returnType.GenericTypeArguments[1];
                         streamReq    = true;
-                        streamRes    = returnTypeName == "AsyncDuplexStreamingCall`2";
+                        streamRes    = returnTypeName.Name == "AsyncDuplexStreamingCall`2";
                         break;
                     case 1:
                         requestType  = parameters[0];
@@ -322,7 +349,7 @@ public class ProtodecContext
         return service;
     }
 
-    protected IProtobufType ParseFieldType(ICilType type, ParserOptions options, Protobuf referencingProtobuf)
+    protected IProtobufType ParseFieldType(ICilType type, CilParserOptions options, Protobuf referencingProtobuf)
     {
         switch (type.GenericTypeArguments.Count)
         {
@@ -339,7 +366,7 @@ public class ProtodecContext
         {
             if (type.IsEnum)
             {
-                if ((options & ParserOptions.SkipEnums) > 0)
+                if (IsEnabled(options, CilParserOptions.SkipEnums))
                 {
                     return Scalar.Int32;
                 }
@@ -355,7 +382,7 @@ public class ProtodecContext
         switch (fieldType)
         {
             case WellKnown wellKnown:
-                referencingProtobuf.Imports.Add(
+                referencingProtobuf.WellKnownImports.Add(
                     wellKnown.FileName);
                 break;
             case INestableType nestableType:
@@ -494,12 +521,12 @@ public class ProtodecContext
         return true;
     }
 
-    protected Protobuf NewProtobuf(ICilType topLevelType, TopLevel topLevel)
+    protected Protobuf NewProtobuf(TopLevel topLevel, string declaringAssemblyName, string? @namespace)
     {
         Protobuf protobuf = new()
         {
-            AssemblyName = topLevelType.DeclaringAssemblyName,
-            Namespace    = topLevelType.Namespace
+            AssemblyName = declaringAssemblyName,
+            Namespace    = @namespace
         };
 
         topLevel.Protobuf = protobuf;
@@ -509,7 +536,7 @@ public class ProtodecContext
         return protobuf;
     }
 
-    protected Protobuf GetProtobuf<T>(ICilType topLevelType, T topLevel, ParserOptions options)
+    protected Protobuf GetProtobuf<T>(ICilType topLevelType, T topLevel, string? @namespace, CilParserOptions options)
         where T : TopLevel, INestableType
     {
         Protobuf protobuf;
@@ -529,111 +556,113 @@ public class ProtodecContext
         }
         else
         {
-            protobuf = NewProtobuf(topLevelType, topLevel);
+            protobuf = NewProtobuf(topLevel, topLevelType.DeclaringAssemblyName, @namespace);
         }
 
         return protobuf;
     }
 
-    protected string TranslateMethodName(string methodName) =>
-        NameLookup?.Invoke(methodName, out string? translatedName) == true
-            ? translatedName
-            : methodName;
+    protected virtual bool TryReadFirstCtorArgAsString(ICilCustomAttribute attribute, [NotNullWhen(true)] out string? arg0)
+    {
+        arg0 = null;
+        if (!attribute.HasConstructorArguments)
+            return false;
+
+        if (attribute is Il2CppGeneratorBackedAttribute)
+            return false; //TODO: parse ctor arg generator
+
+        object? arg = attribute.ConstructorArgumentValues[0];
+        if (arg is not string str)
+            return false;
+
+        arg0 = str;
+        return true;
+    }
+
+    protected ICilTypeNameProvider TranslateTypeName(ICilType type) =>
+        NameTranslator?.TryTranslateTypeName(type.Name, out string? translatedName) == true
+            ? new CilTypeName(translatedName)
+            : type;
 
     protected string TranslateOneOfPropName(string oneOfPropName)
     {
-        if (NameLookup?.Invoke(oneOfPropName, out string? translatedName) != true)
+        if (NameTranslator is not null)
         {
-            if (IsBeebyted(oneOfPropName))
+            if (NameTranslator.TryTranslateMemberName(oneOfPropName, out string? translatedName))
+            {
+                oneOfPropName = translatedName;
+            }
+            else if (NameTranslator.IsNameObfuscated(oneOfPropName))
             {
                 return oneOfPropName;
             }
-
-            translatedName = oneOfPropName;
         }
 
-        return translatedName!.TrimEnd("Case").ToSnakeCaseLower();
+        return StringExtensions.TrimEnd(oneOfPropName.AsSpan(), "Case").ToSnakeCaseLower();
     }
 
     protected string TranslateMessageFieldName(string fieldName)
     {
-        if (NameLookup?.Invoke(fieldName, out string? translatedName) != true)
+        if (NameTranslator is not null)
         {
-            if (IsBeebyted(fieldName))
+            if (NameTranslator.TryTranslateMemberName(fieldName, out string? translatedName))
+            {
+                fieldName = translatedName;
+            }
+            else if (NameTranslator.IsNameObfuscated(fieldName))
             {
                 return fieldName;
             }
-
-            translatedName = fieldName;
         }
 
-        return translatedName!.ToSnakeCaseLower();
+        return fieldName.ToSnakeCaseLower();
     }
 
-    protected string TranslateEnumFieldName(IEnumerable<ICilAttribute> attributes, string fieldName, string enumName)
+    protected bool HasGeneratedCodeAttribute(IEnumerable<ICilCustomAttribute> attributes, string tool) =>
+        attributes.AsValueEnumerable().Any(attr =>
+            attr.Type.Name == nameof(GeneratedCodeAttribute)
+         && (!TryReadFirstCtorArgAsString(attr, out string? arg0) || arg0 == tool /* If we can't read the first parameter, we assume it's fine™ */));
+
+    protected static bool HasNonUserCodeAttribute(IEnumerable<ICilCustomAttribute> attributes) =>
+        attributes.AsValueEnumerable().Any(static attr => attr.Type.Name == nameof(DebuggerNonUserCodeAttribute));
+
+    protected static bool HasObsoleteAttribute(IEnumerable<ICilCustomAttribute> attributes) =>
+        attributes.AsValueEnumerable().Any(static attr => attr.Type.Name == nameof(ObsoleteAttribute));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    protected static bool IsEnabled(CilParserOptions options, CilParserOptions option) =>
+        (options & option) == option;
+
+    private string TranslateEnumFieldName(IEnumerable<ICilCustomAttribute> attributes, string fieldName, string enumName)
     {
-        if (attributes.SingleOrDefault(static attr => attr is { CanReadConstructorArgumentValues: true, Type.Name: "OriginalNameAttribute" })
-                     ?.ConstructorArgumentValues[0] is string originalName)
+        ICilCustomAttribute? nameAttr = attributes.AsValueEnumerable().SingleOrDefault(static attr => attr.Type.Name == "OriginalNameAttribute");
+        if (nameAttr is not null && TryReadFirstCtorArgAsString(nameAttr, out string? originalName))
         {
             return originalName;
         }
 
-        if (NameLookup?.Invoke(fieldName, out string? translatedName) == true)
+        if (NameTranslator is not null)
         {
-            fieldName = translatedName;
+            if (NameTranslator.TryTranslateMemberName(fieldName, out string? translatedName))
+            {
+                fieldName = translatedName;
+            }
+            else if (!NameTranslator.IsNameObfuscated(fieldName))
+            {
+                fieldName = fieldName.ToSnakeCaseUpper();
+            }
+
+            if (!NameTranslator.IsNameObfuscated(enumName))
+            {
+                enumName = enumName.ToSnakeCaseUpper();
+            }
         }
 
-        if (!IsBeebyted(fieldName))
-        {
-            fieldName = fieldName.ToSnakeCaseUpper();
-        }
-
-        if (!IsBeebyted(enumName))
-        {
-            enumName = enumName.ToSnakeCaseUpper();
-        }
-
-        return enumName + '_' + fieldName;
+        return $"{enumName}_{fieldName}";
     }
 
-    protected string TranslateTypeName(ICilType type)
-    {
-        if (NameLookup is null)
-            return type.Name;
-
-        string fullName = type.FullName;
-        int genericArgs = fullName.IndexOf('[');
-        if (genericArgs != -1)
-            fullName = fullName[..genericArgs];
-
-        if (!NameLookup(fullName, out string? translatedName))
-        {
-            return type.Name;
-        }
-
-        int lastSlash = translatedName.LastIndexOf('/');
-        if (lastSlash != -1)
-            translatedName = translatedName[lastSlash..];
-
-        int lastDot = translatedName.LastIndexOf('.');
-        if (lastDot != -1)
-            translatedName = translatedName[lastDot..];
-
-        return translatedName;
-    }
-
-    // ReSharper disable once IdentifierTypo
-    protected static bool IsBeebyted(string name) =>
-        name.Length == 11 && name.CountUpper() == 11;
-
-    protected static bool HasGeneratedCodeAttribute(IEnumerable<ICilAttribute> attributes, string tool) =>
-        attributes.Any(attr => attr.Type.Name == nameof(GeneratedCodeAttribute)
-                            && (!attr.CanReadConstructorArgumentValues
-                             || attr.ConstructorArgumentValues[0] as string == tool));
-
-    protected static bool HasNonUserCodeAttribute(IEnumerable<ICilAttribute> attributes) =>
-        attributes.Any(static attr => attr.Type.Name == nameof(DebuggerNonUserCodeAttribute));
-
-    protected static bool HasObsoleteAttribute(IEnumerable<ICilAttribute> attributes) =>
-        attributes.Any(static attr => attr.Type.Name == nameof(ObsoleteAttribute));
+    private string TranslateMethodName(string methodName) =>
+        NameTranslator?.TryTranslateMemberName(methodName, out string? translatedName) == true
+            ? translatedName
+            : methodName;
 }

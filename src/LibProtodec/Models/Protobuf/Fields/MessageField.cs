@@ -14,13 +14,17 @@ public sealed class MessageField(Message declaringMessage)
 {
     public required IProtobufType Type { get; init; }
     public required string        Name { get; init; }
-    public required int           Id   { get; init; }
 
     public bool IsObsolete { get; init; }
     public bool HasHasProp { get; init; }
 
+    public int? Id { get; internal set; }
+
     public void WriteTo(TextWriter writer, bool isOneOf)
     {
+        if (!Id.HasValue)
+            writer.Write("// ");
+
         if (HasHasProp && !isOneOf && Type is not Repeated)
         {
             writer.Write("optional ");
@@ -31,7 +35,11 @@ public sealed class MessageField(Message declaringMessage)
         writer.Write(' ');
         writer.Write(Name);
         writer.Write(" = ");
-        writer.Write(Id);
+
+        if (Id.HasValue)
+            writer.Write(Id.Value);
+        else
+            writer.Write('?');
 
         if (IsObsolete)
         {

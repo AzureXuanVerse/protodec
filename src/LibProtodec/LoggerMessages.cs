@@ -1,4 +1,4 @@
-﻿// Copyright © 2024 Xpl0itR
+﻿// Copyright © 2024-2026 Xpl0itR
 // 
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -12,40 +12,43 @@ namespace LibProtodec;
 // ReSharper disable InconsistentNaming, StringLiteralTypo
 internal static partial class LoggerMessages
 {
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to locate corresponding id field; likely stripped or otherwise obfuscated.")]
+    [LoggerMessage(LogLevel.Warning, "Failed to locate corresponding id field; likely stripped or otherwise obfuscated.")]
     internal static partial void LogFailedToLocateIdField(this ILogger logger);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Loaded {typeCount} types from {assemblyCount} assemblies for parsing.")]
+    [LoggerMessage(LogLevel.Information, "Loaded {typeCount} types from {assemblyCount} assemblies for parsing.")]
     internal static partial void LogLoadedTypeAndAssemblyCount(this ILogger logger, int typeCount, int assemblyCount);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Parsed as enum \"{name}\".")]
+    [LoggerMessage(LogLevel.Debug, "Parsed as enum \"{name}\".")]
     internal static partial void LogParsedEnum(this ILogger logger, string name);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Parsed as field \"{name}\" with id \"{id}\".")]
+    [LoggerMessage(LogLevel.Debug, "Parsed as field \"{name}\" with id \"{id}\".")]
     internal static partial void LogParsedField(this ILogger logger, string name, int id);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Parsed as field \"{name}\" with id \"{id}\" of type \"{typeName}\".")]
-    internal static partial void LogParsedField(this ILogger logger, string name, int id, string typeName);
+    [LoggerMessage(LogLevel.Debug, "Parsed as field \"{name}\" with id \"{id}\" of type \"{typeName}\".")]
+    internal static partial void LogParsedField(this ILogger logger, string name, int? id, string typeName);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Parsed as message \"{name}\".")]
+    [LoggerMessage(LogLevel.Debug, "Parsed as message \"{name}\".")]
     internal static partial void LogParsedMessage(this ILogger logger, string name);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Parsed as method \"{name}\" with request type \"{reqType}\" and response type \"{resType}\".")]
+    [LoggerMessage(LogLevel.Debug, "Parsed as method \"{name}\" with request type \"{reqType}\" and response type \"{resType}\".")]
     internal static partial void LogParsedMethod(this ILogger logger, string name, string reqType, string resType);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Parsed as oneof field \"{name}\".")]
+    [LoggerMessage(LogLevel.Debug, "Parsed as oneof field \"{name}\".")]
     internal static partial void LogParsedOneOfField(this ILogger logger, string name);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Parsed as service \"{name}\".")]
+    [LoggerMessage(LogLevel.Debug, "Parsed as service \"{name}\".")]
     internal static partial void LogParsedService(this ILogger logger, string name);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Skipping duplicate method.")]
+    [LoggerMessage(LogLevel.Debug, "Skipping duplicate method.")]
     internal static partial void LogSkippingDuplicateMethod(this ILogger logger);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Skipping property without required NonUserCodeAttribute.")]
+    [LoggerMessage(LogLevel.Debug, "Skipping property without required NonUserCodeAttribute.")]
     internal static partial void LogSkippingPropertyWithoutNonUserCodeAttribute(this ILogger logger);
 
-    [LoggerMessage(Level = LogLevel.Debug, Message = "Skipping method without required GeneratedCodeAttribute.")]
+    [LoggerMessage(LogLevel.Debug, "Skipping property without required GeneratedCodeAttribute.")]
+    internal static partial void LogSkippingPropertyWithoutGeneratedCodeAttribute(this ILogger logger);
+
+    [LoggerMessage(LogLevel.Debug, "Skipping method without required GeneratedCodeAttribute.")]
     internal static partial void LogSkippingMethodWithoutGeneratedCodeAttribute(this ILogger logger);
 
     internal static IDisposable? BeginScopeParsingEnum(this ILogger logger, string typeName) =>

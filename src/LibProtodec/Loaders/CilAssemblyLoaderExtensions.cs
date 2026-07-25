@@ -20,6 +20,8 @@ public static class CilAssemblyLoaderExtensions
         return loader.EnumerateTypes().Where(
             type => type is { IsNested: false, IsSealed: true }
                  && type.Namespace?.AsSpan().StartsWith("Google.Protobuf") != true
+                 && type.Namespace?.AsSpan().StartsWith("Google.Api") != true
+                 && type.Namespace?.AsSpan().StartsWith("Buf.Validate") != true
                  && type.IsAssignableTo(iMessage));
     }
 
